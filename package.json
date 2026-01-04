@@ -1,0 +1,8 @@
+{
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^6.1.0",
+    "@nomicfoundation/hardhat-web3-v4": "^1.1.0",
+    "dotenv": "^17.2.3",
+    "web3": "^4.16.0"
+  }
+}
