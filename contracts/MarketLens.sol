@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
-import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 contract Polymarket {
     address public owner;
@@ -28,6 +28,7 @@ contract Polymarket {
         uint256 totalYesAmount;
         uint256 totalNoAmount;
         bool eventCompleted;
+        bool outcome;
         string description;
         string resolverUrl;
     }
