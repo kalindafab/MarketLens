@@ -30,6 +30,14 @@ contract MarketLens is ReentrancyGuard {
         bool outcome; 
         address createdBy;
     }
+    struct PrivateBet {
+    address creator;
+    address opponent; 
+    uint256 stake;   
+    bool isJoined;
+    bool resolved;
+    string description;
+}
 
 
     mapping(uint256 => Question) public questions;
@@ -64,9 +72,6 @@ contract MarketLens is ReentrancyGuard {
         _;
     }
 
-    /**
-     * @dev Creates a new prediction market.
-     */
     function createQuestion(
         string memory _title,
         string memory _description,
@@ -90,6 +95,40 @@ contract MarketLens is ReentrancyGuard {
 
         emit QuestionCreated(questionId, _title, msg.sender, _endTimestamp);
     }
+    
+
+mapping(uint256 => PrivateBet) public privateBets;
+uint256 public totalPrivateBets;
+
+event PrivateBetCreated(uint256 indexed betId, address creator, uint256 stake);
+event PrivateBetJoined(uint256 indexed betId, address opponent);
+
+// Function to create a private bet
+function createPrivateBet(string memory _description, uint256 _stake) external {
+    polyToken.transferFrom(msg.sender, address(this), _stake);
+    
+    uint256 betId = totalPrivateBets++;
+    PrivateBet storage pb = privateBets[betId];
+    pb.creator = msg.sender;
+    pb.stake = _stake;
+    pb.description = _description;
+
+    emit PrivateBetCreated(betId, msg.sender, _stake);
+}
+
+// Function for the friend to join using the ID from the link
+function joinPrivateBet(uint256 _betId) external {
+    PrivateBet storage pb = privateBets[_betId];
+    require(!pb.isJoined, "Bet already has an opponent");
+    require(msg.sender != pb.creator, "Cannot bet against yourself");
+
+    polyToken.transferFrom(msg.sender, address(this), pb.stake);
+    
+    pb.opponent = msg.sender;
+    pb.isJoined = true;
+
+    emit PrivateBetJoined(_betId, msg.sender);
+}
 
     /**
      * @dev Allows users to place a bet. Users must 'approve' the contract on the ERC20 first.
@@ -150,10 +189,10 @@ contract MarketLens is ReentrancyGuard {
         require(userBet.isYes == q.outcome, "Did not win this bet");
 
         uint256 reward = 0;
-        if (q.outcome) { // YES won
+        if (q.outcome) { 
             // Formula: UserShare = (UserYesBet / TotalYesPool) * TotalNoPool
             reward = userBet.amount + (userBet.amount * q.totalNoAmount) / q.totalYesAmount;
-        } else { // NO won
+        } else {
             // Formula: UserShare = (UserNoBet / TotalNoPool) * TotalYesPool
             reward = userBet.amount + (userBet.amount * q.totalYesAmount) / q.totalNoAmount;
         }
