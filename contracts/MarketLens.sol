@@ -175,6 +175,20 @@ function joinPrivateBet(uint256 _betId) external {
 
         emit MarketResolved(_questionId, _outcome);
     }
+    function resolvePrivateBet(uint256 _betId, address _winner) external {
+    PrivateBet storage pb = privateBets[_betId];
+
+    require(msg.sender == pb.creator, "Only the creator can resolve this private bet");
+    require(pb.isJoined, "Bet was never joined by an opponent");
+    require(!pb.resolved, "Bet already resolved");
+    require(_winner == pb.creator || _winner == pb.opponent, "Winner must be a participant");
+
+    pb.resolved = true;
+    uint256 totalPayout = pb.stake * 2;
+    
+    
+    polyToken.transfer(_winner, totalPayout);
+}
 
     /**
      * @dev Users call this to claim their share of the losing pool if they won.
