@@ -52,3 +52,28 @@ function Navbar() {
     </>
   );
 }
+export default Navbar;
+
+const TabButton = ({
+  title,
+  isActive,
+  url,
+}: {
+  title: string;
+  isActive: boolean;
+  url: string;
+}) => {
+  return (
+    <Link href={url} passHref>
+      <div
+        className={`h-full px-4 flex items-center border-b-2 font-semibold hover:border-blue-700 hover:text-blue-700 cursor-pointer ${
+          isActive
+            ? "border-blue-700 text-blue-700 text-lg font-semibold"
+            : "border-white text-gray-400 text-lg"
+        }`}
+      >
+        <span>{title}</span>
+      </div>
+    </Link>
+  );
+};
