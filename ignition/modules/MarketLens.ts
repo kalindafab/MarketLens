@@ -2,8 +2,8 @@ import { buildModule } from "@nomicfoundation/hardhat-ignition/modules";
 
 export default buildModule("MarketLensModule", (m) => {
   
-  const polyToken = m.contract("PolyToken");
-  const marketLens = m.contract("MarketLens", [polyToken]);
+  const collateralToken = m.contract("PolyToken");
+  const marketLens = m.contract("MarketLens", [collateralToken]);
 
-  return { polyToken, marketLens };
+  return { collateralToken, marketLens };
 });

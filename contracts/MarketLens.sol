@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 contract MarketLens is ReentrancyGuard {
@@ -27,23 +27,27 @@ contract MarketLens is ReentrancyGuard {
         uint256 totalNoAmount;
         uint256 totalAmount;
         bool eventCompleted;
-        bool outcome; 
+        bool outcome;
         address createdBy;
     }
-    struct PrivateBet {
-    address creator;
-    address opponent; 
-    uint256 stake;   
-    bool isJoined;
-    bool resolved;
-    string description;
-}
 
+    struct PrivateBet {
+        address creator;
+        address opponent;
+        uint256 stake;
+        bool isJoined;
+        bool resolved;
+        bool cancelled;
+        string description;
+        // Mutual-sign resolution: both parties must agree on the same winner
+        address creatorAgreedWinner;
+        address opponentAgreedWinner;
+    }
 
     mapping(uint256 => Question) public questions;
-    
-    
     mapping(uint256 => mapping(address => Bet)) public userBets;
+    mapping(uint256 => PrivateBet) public privateBets;
+    uint256 public totalPrivateBets;
 
     event QuestionCreated(
         uint256 indexed id,
@@ -51,16 +55,19 @@ contract MarketLens is ReentrancyGuard {
         address indexed createdBy,
         uint256 endTimestamp
     );
-
     event BetPlaced(
         uint256 indexed questionId,
         address indexed user,
         bool isYes,
         uint256 amount
     );
-
     event MarketResolved(uint256 indexed questionId, bool outcome);
     event PayoutClaimed(uint256 indexed questionId, address indexed user, uint256 amount);
+    event PrivateBetCreated(uint256 indexed betId, address creator, uint256 stake);
+    event PrivateBetJoined(uint256 indexed betId, address opponent);
+    event PrivateBetWinnerVote(uint256 indexed betId, address voter, address votedFor);
+    event PrivateBetResolved(uint256 indexed betId, address winner, uint256 payout);
+    event PrivateBetCancelled(uint256 indexed betId, address creator);
 
     constructor(address _collateralToken) {
         owner = msg.sender;
@@ -95,44 +102,34 @@ contract MarketLens is ReentrancyGuard {
 
         emit QuestionCreated(questionId, _title, msg.sender, _endTimestamp);
     }
-    
 
-mapping(uint256 => PrivateBet) public privateBets;
-uint256 public totalPrivateBets;
+    function createPrivateBet(string memory _description, uint256 _stake) external {
+        // FIX: was polyToken.transferFrom — polyToken was never declared
+        collateralToken.transferFrom(msg.sender, address(this), _stake);
 
-event PrivateBetCreated(uint256 indexed betId, address creator, uint256 stake);
-event PrivateBetJoined(uint256 indexed betId, address opponent);
+        uint256 betId = totalPrivateBets++;
+        PrivateBet storage pb = privateBets[betId];
+        pb.creator = msg.sender;
+        pb.stake = _stake;
+        pb.description = _description;
 
-// Function to create a private bet
-function createPrivateBet(string memory _description, uint256 _stake) external {
-    polyToken.transferFrom(msg.sender, address(this), _stake);
-    
-    uint256 betId = totalPrivateBets++;
-    PrivateBet storage pb = privateBets[betId];
-    pb.creator = msg.sender;
-    pb.stake = _stake;
-    pb.description = _description;
+        emit PrivateBetCreated(betId, msg.sender, _stake);
+    }
 
-    emit PrivateBetCreated(betId, msg.sender, _stake);
-}
+    function joinPrivateBet(uint256 _betId) external {
+        PrivateBet storage pb = privateBets[_betId];
+        require(!pb.isJoined, "Bet already has an opponent");
+        require(msg.sender != pb.creator, "Cannot bet against yourself");
 
+        // FIX: was polyToken.transferFrom — polyToken was never declared
+        collateralToken.transferFrom(msg.sender, address(this), pb.stake);
 
-function joinPrivateBet(uint256 _betId) external {
-    PrivateBet storage pb = privateBets[_betId];
-    require(!pb.isJoined, "Bet already has an opponent");
-    require(msg.sender != pb.creator, "Cannot bet against yourself");
+        pb.opponent = msg.sender;
+        pb.isJoined = true;
 
-    polyToken.transferFrom(msg.sender, address(this), pb.stake);
-    
-    pb.opponent = msg.sender;
-    pb.isJoined = true;
+        emit PrivateBetJoined(_betId, msg.sender);
+    }
 
-    emit PrivateBetJoined(_betId, msg.sender);
-}
-
-    /**
-     * @dev Allows users to place a bet. Users must 'approve' the contract on the ERC20 first.
-     */
     function placeBet(uint256 _questionId, uint256 _amount, bool _isYes) external nonReentrant {
         Question storage q = questions[_questionId];
         require(_questionId < totalQuestions, "Invalid question ID");
@@ -140,18 +137,15 @@ function joinPrivateBet(uint256 _betId) external {
         require(!q.eventCompleted, "Market already resolved");
         require(_amount > 0, "Amount must be greater than 0");
 
-        // Transfer tokens from user to this contract
         bool success = collateralToken.transferFrom(msg.sender, address(this), _amount);
         require(success, "Token transfer failed");
 
-        // Update User Bet state
         Bet storage userBet = userBets[_questionId][msg.sender];
         require(userBet.amount == 0 || userBet.isYes == _isYes, "Cannot change bet side");
 
         userBet.amount += _amount;
         userBet.isYes = _isYes;
 
-        // Update Global Market state
         if (_isYes) {
             q.totalYesAmount += _amount;
         } else {
@@ -162,9 +156,6 @@ function joinPrivateBet(uint256 _betId) external {
         emit BetPlaced(_questionId, msg.sender, _isYes, _amount);
     }
 
-    /**
-     * @dev Sets the outcome and completes the event.
-     */
     function resolveMarket(uint256 _questionId, bool _outcome) external onlyOwner {
         Question storage q = questions[_questionId];
         require(!q.eventCompleted, "Market already resolved");
@@ -175,24 +166,72 @@ function joinPrivateBet(uint256 _betId) external {
 
         emit MarketResolved(_questionId, _outcome);
     }
-    function resolvePrivateBet(uint256 _betId, address _winner) external {
-    PrivateBet storage pb = privateBets[_betId];
-
-    require(msg.sender == pb.creator, "Only the creator can resolve this private bet");
-    require(pb.isJoined, "Bet was never joined by an opponent");
-    require(!pb.resolved, "Bet already resolved");
-    require(_winner == pb.creator || _winner == pb.opponent, "Winner must be a participant");
-
-    pb.resolved = true;
-    uint256 totalPayout = pb.stake * 2;
-    
-    
-    polyToken.transfer(_winner, totalPayout);
-}
 
     /**
-     * @dev Users call this to claim their share of the losing pool if they won.
+     * @dev Both the creator and opponent must call this with the same _winner address.
+     * The payout is only released once both parties agree — neither side can unilaterally steal funds.
+     * CEI order: all state changes happen before any external transfer.
      */
+    function agreeWinner(uint256 _betId, address _winner) external nonReentrant {
+        PrivateBet storage pb = privateBets[_betId];
+
+        require(pb.isJoined, "Bet has no opponent yet");
+        require(!pb.resolved, "Bet already resolved");
+        require(!pb.cancelled, "Bet was cancelled");
+        require(
+            msg.sender == pb.creator || msg.sender == pb.opponent,
+            "Not a participant"
+        );
+        require(
+            _winner == pb.creator || _winner == pb.opponent,
+            "Winner must be a participant"
+        );
+
+        // Record this caller's vote
+        if (msg.sender == pb.creator) {
+            pb.creatorAgreedWinner = _winner;
+        } else {
+            pb.opponentAgreedWinner = _winner;
+        }
+
+        emit PrivateBetWinnerVote(_betId, msg.sender, _winner);
+
+        // Only pay out when both votes are cast and agree
+        if (
+            pb.creatorAgreedWinner != address(0) &&
+            pb.opponentAgreedWinner != address(0) &&
+            pb.creatorAgreedWinner == pb.opponentAgreedWinner
+        ) {
+            // CEI: mark resolved before transfer
+            pb.resolved = true;
+            address winner = pb.creatorAgreedWinner;
+            uint256 payout = pb.stake * 2;
+
+            collateralToken.transfer(winner, payout);
+            emit PrivateBetResolved(_betId, winner, payout);
+        }
+    }
+
+    /**
+     * @dev Creator can cancel and reclaim their stake only if no opponent has joined yet.
+     * CEI: state updated before transfer.
+     */
+    function cancelPrivateBet(uint256 _betId) external nonReentrant {
+        PrivateBet storage pb = privateBets[_betId];
+
+        require(msg.sender == pb.creator, "Only creator can cancel");
+        require(!pb.isJoined, "Cannot cancel opponent already joined");
+        require(!pb.cancelled, "Already cancelled");
+        require(!pb.resolved, "Already resolved");
+
+        // CEI: update state before transfer
+        pb.cancelled = true;
+        uint256 refund = pb.stake;
+
+        collateralToken.transfer(pb.creator, refund);
+        emit PrivateBetCancelled(_betId, pb.creator);
+    }
+
     function claimPayout(uint256 _questionId) external nonReentrant {
         Question storage q = questions[_questionId];
         Bet storage userBet = userBets[_questionId][msg.sender];
@@ -203,11 +242,11 @@ function joinPrivateBet(uint256 _betId) external {
         require(userBet.isYes == q.outcome, "Did not win this bet");
 
         uint256 reward = 0;
-        if (q.outcome) { 
-            // Formula: UserShare = (UserYesBet / TotalYesPool) * TotalNoPool
+        if (q.outcome) {
+            require(q.totalYesAmount > 0, "No yes bets in this market");
             reward = userBet.amount + (userBet.amount * q.totalNoAmount) / q.totalYesAmount;
         } else {
-            // Formula: UserShare = (UserNoBet / TotalNoPool) * TotalYesPool
+            require(q.totalNoAmount > 0, "No no bets in this market");
             reward = userBet.amount + (userBet.amount * q.totalYesAmount) / q.totalNoAmount;
         }
 
@@ -218,13 +257,10 @@ function joinPrivateBet(uint256 _betId) external {
         emit PayoutClaimed(_questionId, msg.sender, reward);
     }
 
-    /**
-     * @dev View function to get the current probabilities (prices)
-     */
     function getProbabilities(uint256 _questionId) public view returns (uint256 yesProb, uint256 noProb) {
         Question storage q = questions[_questionId];
         if (q.totalAmount == 0) return (50, 50);
-        yesProb = (q.totalYesAmount * 100) / q.totalAmount;
-        noProb = (q.totalNoAmount * 100) / q.totalAmount;
+        yesProb = (q.totalYesAmount * 10000) / q.totalAmount;
+        noProb = (q.totalNoAmount * 10000) / q.totalAmount;
     }
 }
