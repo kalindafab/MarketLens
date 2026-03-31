@@ -133,8 +133,9 @@ contract MarketLens is ReentrancyGuard {
     function placeBet(uint256 _questionId, uint256 _amount, bool _isYes) external nonReentrant {
         Question storage q = questions[_questionId];
         require(_questionId < totalQuestions, "Invalid question ID");
-        require(block.timestamp < q.endTimestamp, "Trading phase ended");
         require(!q.eventCompleted, "Market already resolved");
+        require(block.timestamp < q.endTimestamp, "Trading phase ended");
+        
         require(_amount > 0, "Amount must be greater than 0");
 
         bool success = collateralToken.transferFrom(msg.sender, address(this), _amount);

@@ -299,8 +299,8 @@ describe("MarketLens", function () {
       await marketLens.connect(user1).placeBet(0, ethers.parseEther("75"), true);
       await marketLens.connect(user2).placeBet(0, ethers.parseEther("25"), false);
       const [yes, no] = await marketLens.getProbabilities(0);
-      expect(yes).to.equal(75);
-      expect(no).to.equal(25);
+      expect(yes).to.equal(7500);
+      expect(no).to.equal(2500);
     });
   });
 
@@ -489,7 +489,7 @@ describe("MarketLens", function () {
       await marketLens.connect(user2).joinPrivateBet(0);
       await expect(
         marketLens.connect(user1).cancelPrivateBet(0)
-      ).to.be.revertedWith("Cannot cancel — opponent already joined");
+      ).to.be.revertedWith("Cannot cancel opponent already joined");
     });
 
     it("reverts if already cancelled", async function () {
