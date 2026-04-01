@@ -13,6 +13,10 @@ const config: HardhatUserConfig = {
       url: process.env.POLYGON_AMOY_RPC_URL || "",
       accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
     },
+     sepolia: {
+      url: process.env.ALCHEMY_SEPOLIA_URL || "",
+      accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
+    },
   },
 };
 
