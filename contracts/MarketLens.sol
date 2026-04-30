@@ -22,6 +22,7 @@ contract MarketLens is ReentrancyGuard {
         string description;
         string creatorImageHash;
         string resolverUrl;
+        uint256 createdAt;
         uint256 endTimestamp;
         uint256 totalYesAmount;
         uint256 totalNoAmount;
@@ -96,7 +97,9 @@ contract MarketLens is ReentrancyGuard {
         q.description = _description;
         q.creatorImageHash = _creatorImageHash;
         q.resolverUrl = _resolverUrl;
+        q.createdAt = block.timestamp;  
         q.endTimestamp = _endTimestamp;
+        
         q.createdBy = msg.sender;
         q.eventCompleted = false;
 
