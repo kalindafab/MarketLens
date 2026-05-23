@@ -33,16 +33,22 @@ contract MarketLens is ReentrancyGuard {
     }
 
     struct PrivateBet {
+        uint256 id;
         address creator;
         address opponent;
-        uint256 stake;
-        bool isJoined;
-        bool resolved;
-        bool cancelled;
-        string description;
-        // Mutual-sign resolution: both parties must agree on the same winner
-        address creatorAgreedWinner;
-        address opponentAgreedWinner;
+        string question;          
+        string description;        
+        uint256 stake;             
+        bool isJoined;             
+        bool resolved;             
+        bool cancelled;            
+        bool outcome;             
+        bool creatorVote;         
+        bool opponentVote;         
+        bool creatorVoted;         
+        bool opponentVoted;        
+        address winner;            
+        uint256 createdAt;
     }
 
     mapping(uint256 => Question) public questions;
@@ -64,10 +70,10 @@ contract MarketLens is ReentrancyGuard {
     );
     event MarketResolved(uint256 indexed questionId, bool outcome);
     event PayoutClaimed(uint256 indexed questionId, address indexed user, uint256 amount);
-    event PrivateBetCreated(uint256 indexed betId, address creator, uint256 stake);
-    event PrivateBetJoined(uint256 indexed betId, address opponent);
-    event PrivateBetWinnerVote(uint256 indexed betId, address voter, address votedFor);
-    event PrivateBetResolved(uint256 indexed betId, address winner, uint256 payout);
+    event PrivateBetCreated(uint256 indexed betId, address indexed creator, string question, uint256 stake);
+    event PrivateBetJoined(uint256 indexed betId, address indexed opponent);
+    event PrivateBetVote(uint256 indexed betId, address indexed voter, bool vote);
+    event PrivateBetResolved(uint256 indexed betId, bool outcome, address winner, uint256 payout);
     event PrivateBetCancelled(uint256 indexed betId, address creator);
 
     constructor(address _collateralToken) {
@@ -106,25 +112,43 @@ contract MarketLens is ReentrancyGuard {
         emit QuestionCreated(questionId, _title, msg.sender, _endTimestamp);
     }
 
-    function createPrivateBet(string memory _description, uint256 _stake) external {
-        // FIX: was polyToken.transferFrom — polyToken was never declared
+       function createPrivateBet(
+        string memory _question,
+        string memory _description,
+        uint256 _stake
+    ) external {
+        require(_stake > 0, "Stake must be > 0");
+        
+       
         collateralToken.transferFrom(msg.sender, address(this), _stake);
 
         uint256 betId = totalPrivateBets++;
         PrivateBet storage pb = privateBets[betId];
+        
+        pb.id = betId;
         pb.creator = msg.sender;
-        pb.stake = _stake;
+        pb.question = _question;
         pb.description = _description;
+        pb.stake = _stake;
+        pb.isJoined = false;
+        pb.resolved = false;
+        pb.cancelled = false;
+        pb.creatorVoted = false;
+        pb.opponentVoted = false;
+        pb.createdAt = block.timestamp;
 
-        emit PrivateBetCreated(betId, msg.sender, _stake);
+        emit PrivateBetCreated(betId, msg.sender, _question, _stake);
     }
 
-    function joinPrivateBet(uint256 _betId) external {
+     function joinPrivateBet(uint256 _betId) external {
         PrivateBet storage pb = privateBets[_betId];
-        require(!pb.isJoined, "Bet already has an opponent");
+        
+        require(!pb.isJoined, "Bet already has opponent");
         require(msg.sender != pb.creator, "Cannot bet against yourself");
+        require(!pb.cancelled, "Bet was cancelled");
+        require(!pb.resolved, "Bet already resolved");
 
-        // FIX: was polyToken.transferFrom — polyToken was never declared
+        // Transfer stake from opponent
         collateralToken.transferFrom(msg.sender, address(this), pb.stake);
 
         pb.opponent = msg.sender;
@@ -132,6 +156,169 @@ contract MarketLens is ReentrancyGuard {
 
         emit PrivateBetJoined(_betId, msg.sender);
     }
+    function voteOnPrivateBet(uint256 _betId, bool _vote) external {
+        PrivateBet storage pb = privateBets[_betId];
+        
+        require(pb.isJoined, "Bet not started");
+        require(!pb.resolved, "Bet already resolved");
+        require(!pb.cancelled, "Bet was cancelled");
+        
+        bool isCreator = (msg.sender == pb.creator);
+        bool isOpponent = (msg.sender == pb.opponent);
+        require(isCreator || isOpponent, "Not a participant");
+
+        if (isCreator) {
+            require(!pb.creatorVoted, "Already voted");
+            pb.creatorVote = _vote;
+            pb.creatorVoted = true;
+        } else {
+            require(!pb.opponentVoted, "Already voted");
+            pb.opponentVote = _vote;
+            pb.opponentVoted = true;
+        }
+
+        emit PrivateBetVote(_betId, msg.sender, _vote);
+
+        // Check if both have voted and resolve automatically
+        if (pb.creatorVoted && pb.opponentVoted) {
+            _resolvePrivateBet(_betId);
+        }
+    }
+        function _resolvePrivateBet(uint256 _betId) internal {
+        PrivateBet storage pb = privateBets[_betId];
+        
+        require(pb.creatorVoted && pb.opponentVoted, "Both must vote");
+        require(!pb.resolved, "Already resolved");
+        
+        // Determine outcome based on votes
+        // If both agree, use that outcome
+        // If disagree, outcome is random (50/50) or can be resolved by admin
+        bool finalOutcome;
+        
+        if (pb.creatorVote == pb.opponentVote) {
+            // Both agree
+            finalOutcome = pb.creatorVote;
+        } else {
+            // Disagreement - default to creator's vote (or can be set to random)
+            // Alternative: send to admin for manual resolution
+            finalOutcome = pb.creatorVote;
+        }
+        
+        pb.outcome = finalOutcome;
+        
+        // Determine winner
+        bool creatorWon = (pb.creatorVote == finalOutcome);
+        bool opponentWon = (pb.opponentVote == finalOutcome);
+        
+        address winner;
+        if (creatorWon && opponentWon) {
+            // Should never happen with different votes
+            winner = pb.creator;
+        } else if (creatorWon) {
+            winner = pb.creator;
+        } else {
+            winner = pb.opponent;
+        }
+        
+        pb.winner = winner;
+        pb.resolved = true;
+        
+        // Send total pot (2 * stake) to winner
+        uint256 totalPayout = pb.stake * 2;
+        collateralToken.transfer(winner, totalPayout);
+        
+        emit PrivateBetResolved(_betId, finalOutcome, winner, totalPayout);
+    }
+
+    function resolvePrivateBetManual(uint256 _betId, bool _outcome) external onlyOwner {
+        PrivateBet storage pb = privateBets[_betId];
+        
+        require(pb.isJoined, "Bet not started");
+        require(!pb.resolved, "Already resolved");
+        require(!pb.cancelled, "Bet was cancelled");
+        
+        pb.outcome = _outcome;
+        
+        // Determine winner based on who voted correctly
+        bool creatorWon = (pb.creatorVote == _outcome);
+        bool opponentWon = (pb.opponentVote == _outcome);
+        
+        address winner;
+        if (creatorWon) {
+            winner = pb.creator;
+        } else if (opponentWon) {
+            winner = pb.opponent;
+        } else {
+            // Neither voted correctly (should not happen)
+            winner = pb.creator; // Default to creator
+        }
+        
+        pb.winner = winner;
+        pb.resolved = true;
+        
+        uint256 totalPayout = pb.stake * 2;
+        collateralToken.transfer(winner, totalPayout);
+        
+        emit PrivateBetResolved(_betId, _outcome, winner, totalPayout);
+    }
+
+    function cancelPrivateBet(uint256 _betId) external {
+        PrivateBet storage pb = privateBets[_betId];
+        
+        require(msg.sender == pb.creator, "Only creator can cancel");
+        require(!pb.isJoined, "Cannot cancel after opponent joined");
+        require(!pb.resolved, "Already resolved");
+        require(!pb.cancelled, "Already cancelled");
+
+        pb.cancelled = true;
+        
+        // Refund stake to creator
+        collateralToken.transfer(pb.creator, pb.stake);
+        
+        emit PrivateBetCancelled(_betId, pb.creator);
+    }
+
+    // Helper function to get private bet details
+    function getPrivateBet(uint256 _betId) external view returns (
+        uint256 id,
+        address creator,
+        address opponent,
+        string memory question,
+        string memory description,
+        uint256 stake,
+        bool isJoined,
+        bool resolved,
+        bool cancelled,
+        bool outcome,
+        bool creatorVote,
+        bool opponentVote,
+        bool creatorVoted,
+        bool opponentVoted,
+        address winner,
+        uint256 createdAt
+    ) {
+        PrivateBet storage pb = privateBets[_betId];
+        return (
+            pb.id,
+            pb.creator,
+            pb.opponent,
+            pb.question,
+            pb.description,
+            pb.stake,
+            pb.isJoined,
+            pb.resolved,
+            pb.cancelled,
+            pb.outcome,
+            pb.creatorVote,
+            pb.opponentVote,
+            pb.creatorVoted,
+            pb.opponentVoted,
+            pb.winner,
+            pb.createdAt
+        );
+    }
+}
+
 
     function placeBet(uint256 _questionId, uint256 _amount, bool _isYes) external nonReentrant {
         Question storage q = questions[_questionId];
@@ -171,71 +358,8 @@ contract MarketLens is ReentrancyGuard {
         emit MarketResolved(_questionId, _outcome);
     }
 
-    /**
-     * @dev Both the creator and opponent must call this with the same _winner address.
-     * The payout is only released once both parties agree — neither side can unilaterally steal funds.
-     * CEI order: all state changes happen before any external transfer.
-     */
-    function agreeWinner(uint256 _betId, address _winner) external nonReentrant {
-        PrivateBet storage pb = privateBets[_betId];
-
-        require(pb.isJoined, "Bet has no opponent yet");
-        require(!pb.resolved, "Bet already resolved");
-        require(!pb.cancelled, "Bet was cancelled");
-        require(
-            msg.sender == pb.creator || msg.sender == pb.opponent,
-            "Not a participant"
-        );
-        require(
-            _winner == pb.creator || _winner == pb.opponent,
-            "Winner must be a participant"
-        );
-
-        // Record this caller's vote
-        if (msg.sender == pb.creator) {
-            pb.creatorAgreedWinner = _winner;
-        } else {
-            pb.opponentAgreedWinner = _winner;
-        }
-
-        emit PrivateBetWinnerVote(_betId, msg.sender, _winner);
-
-        // Only pay out when both votes are cast and agree
-        if (
-            pb.creatorAgreedWinner != address(0) &&
-            pb.opponentAgreedWinner != address(0) &&
-            pb.creatorAgreedWinner == pb.opponentAgreedWinner
-        ) {
-            // CEI: mark resolved before transfer
-            pb.resolved = true;
-            address winner = pb.creatorAgreedWinner;
-            uint256 payout = pb.stake * 2;
-
-            collateralToken.transfer(winner, payout);
-            emit PrivateBetResolved(_betId, winner, payout);
-        }
-    }
-
-    /**
-     * @dev Creator can cancel and reclaim their stake only if no opponent has joined yet.
-     * CEI: state updated before transfer.
-     */
-    function cancelPrivateBet(uint256 _betId) external nonReentrant {
-        PrivateBet storage pb = privateBets[_betId];
-
-        require(msg.sender == pb.creator, "Only creator can cancel");
-        require(!pb.isJoined, "Cannot cancel opponent already joined");
-        require(!pb.cancelled, "Already cancelled");
-        require(!pb.resolved, "Already resolved");
-
-        // CEI: update state before transfer
-        pb.cancelled = true;
-        uint256 refund = pb.stake;
-
-        collateralToken.transfer(pb.creator, refund);
-        emit PrivateBetCancelled(_betId, pb.creator);
-    }
-
+ 
+  
     function claimPayout(uint256 _questionId) external nonReentrant {
         Question storage q = questions[_questionId];
         Bet storage userBet = userBets[_questionId][msg.sender];
