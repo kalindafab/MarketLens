@@ -15,7 +15,6 @@ describe("MarketLens", function () {
   const STAKE = ethers.parseEther("100");
   const ONE_DAY = 24 * 60 * 60;
 
-  // Helper: deploy fresh contracts before each test
   beforeEach(async function () {
     [owner, user1, user2, user3] = await ethers.getSigners();
 
@@ -25,7 +24,6 @@ describe("MarketLens", function () {
     const MarketLensFactory = await ethers.getContractFactory("MarketLens");
     marketLens = await MarketLensFactory.deploy(await polyToken.getAddress());
 
-    // Mint tokens to users and approve MarketLens to spend them
     await polyToken.mint(user1.address, ethers.parseEther("10000"));
     await polyToken.mint(user2.address, ethers.parseEther("10000"));
     await polyToken.mint(user3.address, ethers.parseEther("10000"));
@@ -36,7 +34,6 @@ describe("MarketLens", function () {
     await polyToken.approve(await marketLens.getAddress(), ethers.MaxUint256);
   });
 
-  // Helper: create a question that ends in 1 day
   async function createQuestion(endOffset = ONE_DAY) {
     const endTimestamp = (await time.latest()) + endOffset;
     await marketLens.createQuestion(
@@ -97,6 +94,46 @@ describe("MarketLens", function () {
   });
 
   // ─────────────────────────────────────────────
+  // createPrivateQuestion
+  // ─────────────────────────────────────────────
+  describe("createPrivateQuestion", function () {
+    it("allows any user to create a private question", async function () {
+      const endTimestamp = (await time.latest()) + ONE_DAY;
+      await marketLens.connect(user1).createPrivateQuestion(
+        "Will it rain?",
+        "Private weather bet",
+        "ipfs://hash",
+        "https://resolver.com",
+        endTimestamp
+      );
+      const q = await marketLens.questions(0);
+      expect(q.createdBy).to.equal(user1.address);
+      expect(q.title).to.equal("Will it rain?");
+    });
+
+    it("prepends [PRIVATE] to the description", async function () {
+      const endTimestamp = (await time.latest()) + ONE_DAY;
+      await marketLens.connect(user1).createPrivateQuestion(
+        "Will it rain?",
+        "Private weather bet",
+        "ipfs://hash",
+        "https://resolver.com",
+        endTimestamp
+      );
+      const q = await marketLens.questions(0);
+      expect(q.description).to.include("[PRIVATE]");
+    });
+
+    it("increments totalQuestions", async function () {
+      const endTimestamp = (await time.latest()) + ONE_DAY;
+      await marketLens.connect(user1).createPrivateQuestion(
+        "Test", "Desc", "hash", "url", endTimestamp
+      );
+      expect(await marketLens.totalQuestions()).to.equal(1);
+    });
+  });
+
+  // ─────────────────────────────────────────────
   // placeBet
   // ─────────────────────────────────────────────
   describe("placeBet", function () {
@@ -118,7 +155,6 @@ describe("MarketLens", function () {
     it("places a NO bet and updates state", async function () {
       await marketLens.connect(user1).placeBet(0, STAKE, false);
       const q = await marketLens.questions(0);
-
       expect(q.totalNoAmount).to.equal(STAKE);
     });
 
@@ -171,6 +207,141 @@ describe("MarketLens", function () {
   });
 
   // ─────────────────────────────────────────────
+  // sellBet
+  // ─────────────────────────────────────────────
+  describe("sellBet", function () {
+    beforeEach(async function () {
+      await createQuestion();
+    });
+
+    it("reverts if user has no bet to sell", async function () {
+      await expect(
+        marketLens.connect(user1).sellBet(0)
+      ).to.be.revertedWith("No bet to sell");
+    });
+
+    it("refunds full stake when user is the only bettor (50/50 pool)", async function () {
+      await marketLens.connect(user1).placeBet(0, STAKE, true);
+
+      const balanceBefore = await polyToken.balanceOf(user1.address);
+      await marketLens.connect(user1).sellBet(0);
+      const balanceAfter = await polyToken.balanceOf(user1.address);
+
+      // sidePool == totalAmount == STAKE → sellValue = STAKE * STAKE * 95 / (STAKE * 100) = STAKE * 0.95
+      const expected = (STAKE * 95n) / 100n;
+      expect(balanceAfter - balanceBefore).to.equal(expected);
+    });
+
+    it("clears the user's bet after selling", async function () {
+      await marketLens.connect(user1).placeBet(0, STAKE, true);
+      await marketLens.connect(user1).sellBet(0);
+
+      const bet = await marketLens.userBets(0, user1.address);
+      expect(bet.amount).to.equal(0);
+      expect(bet.claimed).to.equal(true);
+    });
+
+    it("removes the stake from the side pool and total pool", async function () {
+      await marketLens.connect(user1).placeBet(0, STAKE, true);
+      await marketLens.connect(user2).placeBet(0, STAKE, false);
+
+      await marketLens.connect(user1).sellBet(0);
+
+      const q = await marketLens.questions(0);
+      expect(q.totalYesAmount).to.equal(0);
+      expect(q.totalNoAmount).to.equal(STAKE);
+      expect(q.totalAmount).to.equal(STAKE);
+    });
+
+    it("pays more than original stake when selling side has minority pool (profit)", async function () {
+      // user1 bets 50 YES, user2 bets 150 NO → YES side is the minority (1:4 of total)
+      const yesStake = ethers.parseEther("50");
+      const noStake  = ethers.parseEther("150");
+      await marketLens.connect(user1).placeBet(0, yesStake, true);
+      await marketLens.connect(user2).placeBet(0, noStake, false);
+
+      const [sellValue, originalStake] = await marketLens.getSellValue(0, user1.address);
+
+      expect(originalStake).to.equal(yesStake);
+      // sellValue = yesStake * totalAmount * 95 / (yesPool * 100)
+      //           = 50 * 200 * 95 / (50 * 100) = 19000/100 = 190
+      expect(sellValue).to.be.gt(originalStake);
+    });
+
+    it("pays less than original stake when selling side has majority pool (loss)", async function () {
+      // user1 bets 150 YES, user2 bets 50 NO → YES side is the majority
+      const yesStake = ethers.parseEther("150");
+      const noStake  = ethers.parseEther("50");
+      await marketLens.connect(user1).placeBet(0, yesStake, true);
+      await marketLens.connect(user2).placeBet(0, noStake, false);
+
+      const [sellValue, originalStake] = await marketLens.getSellValue(0, user1.address);
+
+      expect(originalStake).to.equal(yesStake);
+      expect(sellValue).to.be.lt(originalStake);
+    });
+
+    it("getSellValue returns (0,0) when user has no bet", async function () {
+      const [sellValue, originalStake] = await marketLens.getSellValue(0, user1.address);
+      expect(sellValue).to.equal(0);
+      expect(originalStake).to.equal(0);
+    });
+
+    it("reverts if market has already resolved", async function () {
+      await marketLens.connect(user1).placeBet(0, STAKE, true);
+      await time.increase(ONE_DAY + 1);
+      await marketLens.resolveMarket(0, true);
+
+      await expect(
+        marketLens.connect(user1).sellBet(0)
+      ).to.be.revertedWith("Market already resolved");
+    });
+
+    it("reverts if market has ended (deadline passed) even if not resolved", async function () {
+      await marketLens.connect(user1).placeBet(0, STAKE, true);
+      await time.increase(ONE_DAY + 1);
+
+      await expect(
+        marketLens.connect(user1).sellBet(0)
+      ).to.be.revertedWith("Market has ended");
+    });
+
+    it("reverts on double sell", async function () {
+      await marketLens.connect(user1).placeBet(0, STAKE, true);
+      await marketLens.connect(user1).sellBet(0);
+
+      await expect(
+        marketLens.connect(user1).sellBet(0)
+      ).to.be.revertedWith("No bet to sell");
+    });
+
+    it("emits BetPlaced event with 0 amount on sell", async function () {
+      await marketLens.connect(user1).placeBet(0, STAKE, true);
+      await expect(marketLens.connect(user1).sellBet(0))
+        .to.emit(marketLens, "BetPlaced")
+        .withArgs(0, user1.address, true, 0);
+    });
+
+    it("updates probabilities after a sell", async function () {
+      await marketLens.connect(user1).placeBet(0, STAKE, true);
+      await marketLens.connect(user2).placeBet(0, STAKE, false);
+
+      // Before sell: 50/50
+      let [yes, no] = await marketLens.getProbabilities(0);
+      expect(yes).to.equal(5000);
+      expect(no).to.equal(5000);
+
+      // user1 sells their YES position entirely
+      await marketLens.connect(user1).sellBet(0);
+
+      // Now only NO pool remains → 100% NO
+      [yes, no] = await marketLens.getProbabilities(0);
+      expect(no).to.equal(10000);
+      expect(yes).to.equal(0);
+    });
+  });
+
+  // ─────────────────────────────────────────────
   // resolveMarket
   // ─────────────────────────────────────────────
   describe("resolveMarket", function () {
@@ -207,11 +378,53 @@ describe("MarketLens", function () {
       );
     });
 
-    it("reverts if called by non-owner", async function () {
+    it("reverts if called by non-owner on a public market", async function () {
       await time.increase(ONE_DAY + 1);
       await expect(
         marketLens.connect(user1).resolveMarket(0, true)
       ).to.be.revertedWith("MarketLens: Unauthorized");
+    });
+  });
+
+  // ─────────────────────────────────────────────
+  // resolvePrivateMarket
+  // ─────────────────────────────────────────────
+  describe("resolvePrivateMarket", function () {
+    let endTimestamp: number;
+
+    beforeEach(async function () {
+      endTimestamp = (await time.latest()) + ONE_DAY;
+      await marketLens.connect(user1).createPrivateQuestion(
+        "Private market", "Desc", "hash", "url", endTimestamp
+      );
+    });
+
+    it("allows the creator to resolve their own private market", async function () {
+      await time.increase(ONE_DAY + 1);
+      await marketLens.connect(user1).resolvePrivateMarket(0, true);
+      const q = await marketLens.questions(0);
+      expect(q.eventCompleted).to.equal(true);
+      expect(q.outcome).to.equal(true);
+    });
+
+    it("allows the owner to resolve a private market", async function () {
+      await time.increase(ONE_DAY + 1);
+      await marketLens.resolvePrivateMarket(0, false);
+      const q = await marketLens.questions(0);
+      expect(q.eventCompleted).to.equal(true);
+    });
+
+    it("reverts if called by someone who is neither owner nor creator", async function () {
+      await time.increase(ONE_DAY + 1);
+      await expect(
+        marketLens.connect(user2).resolvePrivateMarket(0, true)
+      ).to.be.revertedWith("MarketLens: Unauthorized");
+    });
+
+    it("reverts if called before end time", async function () {
+      await expect(
+        marketLens.connect(user1).resolvePrivateMarket(0, true)
+      ).to.be.revertedWith("Cannot resolve before end time");
     });
   });
 
@@ -279,6 +492,17 @@ describe("MarketLens", function () {
         marketLens.connect(user1).claimPayout(0)
       ).to.be.revertedWith("Already claimed");
     });
+
+    it("reverts if user sold their position before resolution", async function () {
+      // user1 sells before market ends
+      await marketLens.connect(user1).sellBet(0);
+      await time.increase(ONE_DAY + 1);
+      await marketLens.resolveMarket(0, true);
+
+      await expect(
+        marketLens.connect(user1).claimPayout(0)
+      ).to.be.revertedWith("No bet placed");
+    });
   });
 
   // ─────────────────────────────────────────────
@@ -291,8 +515,8 @@ describe("MarketLens", function () {
 
     it("returns 50/50 when no bets placed", async function () {
       const [yes, no] = await marketLens.getProbabilities(0);
-      expect(yes).to.equal(50);
-      expect(no).to.equal(50);
+      expect(yes).to.equal(5000);
+      expect(no).to.equal(5000);
     });
 
     it("returns correct probabilities with bets", async function () {
@@ -301,202 +525,6 @@ describe("MarketLens", function () {
       const [yes, no] = await marketLens.getProbabilities(0);
       expect(yes).to.equal(7500);
       expect(no).to.equal(2500);
-    });
-  });
-
-  // ─────────────────────────────────────────────
-  // createPrivateBet
-  // ─────────────────────────────────────────────
-  describe("createPrivateBet", function () {
-    it("creates a private bet and stores it correctly", async function () {
-      await marketLens.connect(user1).createPrivateBet("Who wins the match?", STAKE);
-      const pb = await marketLens.privateBets(0);
-
-      expect(pb.creator).to.equal(user1.address);
-      expect(pb.stake).to.equal(STAKE);
-      expect(pb.description).to.equal("Who wins the match?");
-      expect(pb.isJoined).to.equal(false);
-      expect(pb.resolved).to.equal(false);
-    });
-
-    it("transfers stake from creator to contract", async function () {
-      const balanceBefore = await polyToken.balanceOf(user1.address);
-      await marketLens.connect(user1).createPrivateBet("Test bet", STAKE);
-      const balanceAfter = await polyToken.balanceOf(user1.address);
-      expect(balanceBefore - balanceAfter).to.equal(STAKE);
-    });
-
-    it("emits PrivateBetCreated event", async function () {
-      await expect(marketLens.connect(user1).createPrivateBet("Test", STAKE))
-        .to.emit(marketLens, "PrivateBetCreated")
-        .withArgs(0, user1.address, STAKE);
-    });
-
-    it("increments totalPrivateBets", async function () {
-      expect(await marketLens.totalPrivateBets()).to.equal(0);
-      await marketLens.connect(user1).createPrivateBet("Test", STAKE);
-      expect(await marketLens.totalPrivateBets()).to.equal(1);
-    });
-  });
-
-  // ─────────────────────────────────────────────
-  // joinPrivateBet
-  // ─────────────────────────────────────────────
-  describe("joinPrivateBet", function () {
-    beforeEach(async function () {
-      await marketLens.connect(user1).createPrivateBet("Test bet", STAKE);
-    });
-
-    it("allows opponent to join and updates state", async function () {
-      await marketLens.connect(user2).joinPrivateBet(0);
-      const pb = await marketLens.privateBets(0);
-      expect(pb.opponent).to.equal(user2.address);
-      expect(pb.isJoined).to.equal(true);
-    });
-
-    it("transfers stake from opponent to contract", async function () {
-      const balanceBefore = await polyToken.balanceOf(user2.address);
-      await marketLens.connect(user2).joinPrivateBet(0);
-      const balanceAfter = await polyToken.balanceOf(user2.address);
-      expect(balanceBefore - balanceAfter).to.equal(STAKE);
-    });
-
-    it("emits PrivateBetJoined event", async function () {
-      await expect(marketLens.connect(user2).joinPrivateBet(0))
-        .to.emit(marketLens, "PrivateBetJoined")
-        .withArgs(0, user2.address);
-    });
-
-    it("reverts if creator tries to join their own bet", async function () {
-      await expect(
-        marketLens.connect(user1).joinPrivateBet(0)
-      ).to.be.revertedWith("Cannot bet against yourself");
-    });
-
-    it("reverts if bet already has an opponent", async function () {
-      await marketLens.connect(user2).joinPrivateBet(0);
-      await expect(
-        marketLens.connect(user3).joinPrivateBet(0)
-      ).to.be.revertedWith("Bet already has an opponent");
-    });
-  });
-
-  // ─────────────────────────────────────────────
-  // agreeWinner (mutual-sign resolution)
-  // ─────────────────────────────────────────────
-  describe("agreeWinner", function () {
-    beforeEach(async function () {
-      await marketLens.connect(user1).createPrivateBet("Test bet", STAKE);
-      await marketLens.connect(user2).joinPrivateBet(0);
-    });
-
-    it("does not pay out when only one party has voted", async function () {
-      await marketLens.connect(user1).agreeWinner(0, user1.address);
-      const pb = await marketLens.privateBets(0);
-      expect(pb.resolved).to.equal(false);
-    });
-
-    it("pays out when both parties agree on the same winner", async function () {
-      const balanceBefore = await polyToken.balanceOf(user1.address);
-      await marketLens.connect(user1).agreeWinner(0, user1.address);
-      await marketLens.connect(user2).agreeWinner(0, user1.address);
-      const balanceAfter = await polyToken.balanceOf(user1.address);
-
-      expect(balanceAfter - balanceBefore).to.equal(STAKE * 2n);
-      const pb = await marketLens.privateBets(0);
-      expect(pb.resolved).to.equal(true);
-    });
-
-    it("does not pay out when parties disagree", async function () {
-      await marketLens.connect(user1).agreeWinner(0, user1.address);
-      await marketLens.connect(user2).agreeWinner(0, user2.address); // disagrees
-      const pb = await marketLens.privateBets(0);
-      expect(pb.resolved).to.equal(false);
-    });
-
-    it("emits PrivateBetWinnerVote on each vote", async function () {
-      await expect(marketLens.connect(user1).agreeWinner(0, user1.address))
-        .to.emit(marketLens, "PrivateBetWinnerVote")
-        .withArgs(0, user1.address, user1.address);
-    });
-
-    it("emits PrivateBetResolved when both agree", async function () {
-      await marketLens.connect(user1).agreeWinner(0, user2.address);
-      await expect(marketLens.connect(user2).agreeWinner(0, user2.address))
-        .to.emit(marketLens, "PrivateBetResolved")
-        .withArgs(0, user2.address, STAKE * 2n);
-    });
-
-    it("reverts if bet has no opponent yet", async function () {
-      await marketLens.connect(user3).createPrivateBet("Unjoined bet", STAKE);
-      await expect(
-        marketLens.connect(user3).agreeWinner(1, user3.address)
-      ).to.be.revertedWith("Bet has no opponent yet");
-    });
-
-    it("reverts if a non-participant calls it", async function () {
-      await expect(
-        marketLens.connect(user3).agreeWinner(0, user1.address)
-      ).to.be.revertedWith("Not a participant");
-    });
-
-    it("reverts if already resolved", async function () {
-      await marketLens.connect(user1).agreeWinner(0, user1.address);
-      await marketLens.connect(user2).agreeWinner(0, user1.address);
-      await expect(
-        marketLens.connect(user1).agreeWinner(0, user1.address)
-      ).to.be.revertedWith("Bet already resolved");
-    });
-
-    it("reverts if winner is not a participant", async function () {
-      await expect(
-        marketLens.connect(user1).agreeWinner(0, user3.address)
-      ).to.be.revertedWith("Winner must be a participant");
-    });
-  });
-
-  // ─────────────────────────────────────────────
-  // cancelPrivateBet
-  // ─────────────────────────────────────────────
-  describe("cancelPrivateBet", function () {
-    beforeEach(async function () {
-      await marketLens.connect(user1).createPrivateBet("Test bet", STAKE);
-    });
-
-    it("refunds the creator and marks bet as cancelled", async function () {
-      const balanceBefore = await polyToken.balanceOf(user1.address);
-      await marketLens.connect(user1).cancelPrivateBet(0);
-      const balanceAfter = await polyToken.balanceOf(user1.address);
-
-      expect(balanceAfter - balanceBefore).to.equal(STAKE);
-      const pb = await marketLens.privateBets(0);
-      expect(pb.cancelled).to.equal(true);
-    });
-
-    it("emits PrivateBetCancelled event", async function () {
-      await expect(marketLens.connect(user1).cancelPrivateBet(0))
-        .to.emit(marketLens, "PrivateBetCancelled")
-        .withArgs(0, user1.address);
-    });
-
-    it("reverts if called by non-creator", async function () {
-      await expect(
-        marketLens.connect(user2).cancelPrivateBet(0)
-      ).to.be.revertedWith("Only creator can cancel");
-    });
-
-    it("reverts if opponent has already joined", async function () {
-      await marketLens.connect(user2).joinPrivateBet(0);
-      await expect(
-        marketLens.connect(user1).cancelPrivateBet(0)
-      ).to.be.revertedWith("Cannot cancel opponent already joined");
-    });
-
-    it("reverts if already cancelled", async function () {
-      await marketLens.connect(user1).cancelPrivateBet(0);
-      await expect(
-        marketLens.connect(user1).cancelPrivateBet(0)
-      ).to.be.revertedWith("Already cancelled");
     });
   });
 });

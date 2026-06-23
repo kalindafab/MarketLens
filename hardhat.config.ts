@@ -2,7 +2,7 @@ import { HardhatUserConfig } from "hardhat/config";
 import "@nomicfoundation/hardhat-toolbox";
 import "@nomicfoundation/hardhat-web3-v4";
 import * as dotenv from "dotenv";
-
+import "hardhat-contract-sizer";
 dotenv.config();
 
 const config: HardhatUserConfig = {
